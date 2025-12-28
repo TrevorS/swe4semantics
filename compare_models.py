@@ -109,7 +109,7 @@ def main():
     models = [
         ("data/output/swe_1k.txt", "DistilBERT + MiniLM", "fast"),
         ("data/output/swe_bge_1k.txt", "BGE-small + BGE-base", "balanced"),
-        ("data/output/swe_qwen_500.txt", "Qwen3-Embedding-0.6B", "sota"),
+        ("data/output/swe_qwen_1k.txt", "Qwen3-Embedding-0.6B (1k)", "sota"),
     ]
 
     print("=" * 70)
