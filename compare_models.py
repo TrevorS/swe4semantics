@@ -105,11 +105,24 @@ def find_similar_words(word, word2vec, topk=5):
     return sorted(similarities, key=lambda x: -x[1])[:topk]
 
 
+def load_multisense_embeddings(path):
+    """Load multi-sense embeddings from JSON format."""
+    import json
+    word2vec = {}
+    with open(path, 'r') as f:
+        data = json.load(f)
+        for word, senses in data.items():
+            # Use primary sense (highest frequency)
+            word2vec[word] = np.array(senses[0]['embedding'])
+    return word2vec
+
+
 def main():
     models = [
         ("data/output/swe_1k.txt", "DistilBERT + MiniLM", "fast"),
         ("data/output/swe_bge_1k.txt", "BGE-small + BGE-base", "balanced"),
         ("data/output/swe_qwen_1k.txt", "Qwen3-Embedding-0.6B (1k)", "sota"),
+        ("data/output/swe_multisense.json", "Qwen3-Multi-Sense (3 senses)", "multi-sense"),
     ]
 
     print("=" * 70)
@@ -120,7 +133,10 @@ def main():
 
     for path, name, quality in models:
         try:
-            word2vec = load_embeddings(path)
+            if path.endswith('.json'):
+                word2vec = load_multisense_embeddings(path)
+            else:
+                word2vec = load_embeddings(path)
             print(f"\n{'='*70}")
             print(f"Model: {name} ({quality})")
             print(f"Vocabulary: {len(word2vec)} words, {len(list(word2vec.values())[0])}d")
