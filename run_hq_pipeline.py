@@ -40,6 +40,11 @@ MODEL_CONFIGS = {
         "base": "Alibaba-NLP/gte-base-en-v1.5",
         "teacher": "Alibaba-NLP/gte-large-en-v1.5",
         "desc": "SOTA GTE models from paper (~60 min)"
+    },
+    "qwen": {
+        "base": "Qwen/Qwen3-Embedding-0.6B",
+        "teacher": "Qwen/Qwen3-Embedding-0.6B",
+        "desc": "Qwen3 0.6B - top open-source embeddings (~30 min)"
     }
 }
 
@@ -363,7 +368,7 @@ def save_embeddings(word2vec, output_path):
 def main():
     parser = argparse.ArgumentParser(description="High-Quality SWE Training Pipeline")
     parser.add_argument('-quality', type=str, default='balanced',
-                        choices=['fast', 'balanced', 'high', 'sota'],
+                        choices=['fast', 'balanced', 'high', 'sota', 'qwen'],
                         help='Quality level: fast, balanced, high, or sota')
     parser.add_argument('-max_words', type=int, default=1000, help='Max vocabulary size')
     parser.add_argument('-nsent', type=int, default=20, help='Sentences per word for extraction')
