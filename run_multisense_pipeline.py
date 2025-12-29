@@ -47,6 +47,14 @@ MODEL_CONFIGS = {
     }
 }
 
+# Required words for fair evaluation comparison
+REQUIRED_WORDS = [
+    "man", "woman", "good", "great", "big", "large", "new", "old",
+    "first", "second", "time", "year", "people", "government",
+    "world", "country", "high", "low", "king", "queen", "boy", "girl",
+    "better", "best", "small", "little", "day", "night", "city", "town"
+]
+
 
 def create_word2sent(max_words=1000):
     """Create word -> sentences mapping from wikitext."""
@@ -92,37 +100,95 @@ def create_word2sent(max_words=1000):
     filtered = {w: sents for w, sents in word2sent.items()
                 if len(sents) >= 10}  # Need enough for clustering
 
-    # Sort by frequency and take top words
+    # First, ensure required words are included (if they have contexts)
+    final = {}
+    for word in REQUIRED_WORDS:
+        if word in filtered:
+            final[word] = filtered[word][:50]
+
+    required_added = len(final)
+
+    # Fill remaining slots with top frequency words
     sorted_words = sorted(filtered.keys(),
                           key=lambda w: len(filtered[w]), reverse=True)
-    final = {w: filtered[w][:50] for w in sorted_words[:max_words]}
+    remaining_slots = max_words - len(final)
 
-    print(f"Created word2sent with {len(final)} words")
+    for w in sorted_words:
+        if w not in final and remaining_slots > 0:
+            final[w] = filtered[w][:50]
+            remaining_slots -= 1
+
+    print(f"Created word2sent with {len(final)} words ({required_added} required words)")
     return final
 
 
-def extract_contextual_embeddings(word2sent, model_name, n_contexts=30):
-    """Extract contextual embeddings using sentence embeddings for each word context."""
-    from sentence_transformers import SentenceTransformer
+def extract_contextual_embeddings(word2sent, model_name, n_contexts=30, use_token_level=True):
+    """Extract contextual embeddings for each word in its contexts.
 
-    print(f"Loading sentence embedding model {model_name}...")
-    model = SentenceTransformer(model_name, trust_remote_code=True)
+    If use_token_level=True: Extract the hidden state of the target word token
+    If use_token_level=False: Use sentence embedding (less precise)
+    """
+    lazy_import_torch()
 
-    word_embeddings = defaultdict(list)  # word -> list of sentence embeddings
+    print(f"Loading model {model_name}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+    model.eval()
+
+    # Move to GPU if available
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
+
+    word_embeddings = defaultdict(list)  # word -> list of contextual embeddings
 
     for word, sentences in tqdm(word2sent.items(), desc="Extracting"):
         contexts = sentences[:n_contexts]
         if len(contexts) < 5:
             continue
 
-        # Encode all sentences containing this word
-        # The sentence embedding captures the word's meaning in that context
-        try:
-            embs = model.encode(contexts, show_progress_bar=False)
-            for emb in embs:
-                word_embeddings[word].append(emb)
-        except Exception as e:
-            continue
+        for sent in contexts:
+            try:
+                # Tokenize
+                inputs = tokenizer(sent, return_tensors="pt", truncation=True, max_length=128)
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+
+                # Get hidden states
+                with torch.no_grad():
+                    outputs = model(**inputs, output_hidden_states=True)
+
+                # Get last layer hidden states
+                if hasattr(outputs, 'last_hidden_state'):
+                    hidden = outputs.last_hidden_state[0]  # [seq_len, hidden_dim]
+                else:
+                    hidden = outputs.hidden_states[-1][0]
+
+                if use_token_level:
+                    # Find the target word's token position(s)
+                    tokens = tokenizer.convert_ids_to_tokens(inputs['input_ids'][0])
+                    word_lower = word.lower()
+
+                    # Find token positions that match the word
+                    word_positions = []
+                    for i, tok in enumerate(tokens):
+                        # Handle subword tokens (e.g., "##ing" in BERT, "▁word" in sentencepiece)
+                        tok_clean = tok.replace('##', '').replace('▁', '').replace('Ġ', '').lower()
+                        if tok_clean == word_lower or word_lower.startswith(tok_clean):
+                            word_positions.append(i)
+
+                    if word_positions:
+                        # Average hidden states at word positions
+                        word_hidden = hidden[word_positions].mean(dim=0)
+                    else:
+                        # Fallback: use mean pooling (exclude special tokens)
+                        word_hidden = hidden[1:-1].mean(dim=0)
+                else:
+                    # Mean pooling over all tokens (sentence embedding)
+                    word_hidden = hidden[1:-1].mean(dim=0)
+
+                word_embeddings[word].append(word_hidden.cpu().numpy())
+
+            except Exception as e:
+                continue
 
     # Filter words with enough embeddings
     result = {w: embs for w, embs in word_embeddings.items() if len(embs) >= 5}
