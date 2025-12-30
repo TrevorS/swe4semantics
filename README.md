@@ -1,5 +1,194 @@
 # swe4semantics
-This repositiory provides code and static word embeddings (SWEs) proposed in our paper "[Static Word Embeddings for Sentence Semantic Representation](https://aclanthology.org/2025.emnlp-main.316)" (EMNLP 25 Main).
+
+This repository provides code and static word embeddings (SWEs) proposed in our paper "[Static Word Embeddings for Sentence Semantic Representation](https://aclanthology.org/2025.emnlp-main.316)" (EMNLP 25 Main).
+
+## Quick Start (New Pipeline)
+
+This repository now includes a modernized **uv-powered pipeline** that automates the full training process using Qwen3-Embedding models.
+
+### Installation
+
+```bash
+# Using uv (recommended)
+uv sync
+
+# Or with pip
+pip install -e .
+```
+
+### Run the Pipeline
+
+```bash
+# Quick test (0.6B model, 1k vocab, ~15 min on CPU)
+uv run python scripts/run_pipeline.py --mode test --output-dir outputs/test
+
+# Production run (8B model, 150k vocab, requires GPU)
+uv run python scripts/run_pipeline.py --mode production --output-dir outputs/prod
+
+# With Weights & Biases experiment tracking
+uv run python scripts/run_pipeline.py --mode test --output-dir outputs/test --wandb
+```
+
+### Using the Makefile
+
+```bash
+make install      # Install dependencies
+make run-test     # Run test pipeline
+make run-prod     # Run production pipeline
+make check        # Run linting, formatting, and tests
+```
+
+### Using the Static Encoder
+
+```python
+from qwen3_static_embeddings import StaticEncoder, load_word2vec_text
+
+# Load embeddings
+embeddings = load_word2vec_text("outputs/test/exports/qwen3_static.w2v.txt")
+
+# Create encoder
+encoder = StaticEncoder(word2vec=embeddings, dim=256, normalize=True)
+
+# Encode text
+embedding = encoder.encode("machine learning is amazing")
+
+# Batch encoding
+texts = ["hello world", "deep learning", "natural language processing"]
+embeddings = encoder.encode_batch(texts)
+
+# Compute similarity
+similarity = encoder.similarity("cat", "dog")
+```
+
+### Pipeline Steps
+
+1. **Corpus Download**: Streams CC-100 English corpus via HuggingFace
+2. **Vocabulary Building**: Builds word frequency vocabulary with BlingFire
+3. **Word2Sent Mapping**: Maps vocabulary words to context sentences
+4. **Embedding Extraction**: Extracts embeddings from Qwen3-Embedding
+5. **PCA Post-processing**: Applies "All-but-the-Top" dimensionality reduction
+6. **Export**: Saves in Word2Vec, GloVe, and NumPy formats
+7. **Evaluation**: Runs word similarity benchmarks
+
+### Export Formats
+
+| Format | File | Compatible With |
+|--------|------|-----------------|
+| Word2Vec Text | `*.w2v.txt` | gensim, fastText |
+| Word2Vec Binary | `*.w2v.bin` | gensim (faster) |
+| GloVe Text | `*.glove.txt` | GloVe tools |
+| NumPy | `*.npz` | NumPy, scikit-learn |
+
+### Model Comparison
+
+Compare your trained embeddings against baselines:
+
+```bash
+# Compare against Model2Vec baselines (e.g., potion-base-8M)
+uv run python scripts/compare_models.py \
+    --static outputs/test/exports/qwen3_static.w2v.txt \
+    --baseline minishlab/potion-base-8M \
+    --word-only
+
+# Compare against original transformer model
+uv run python scripts/compare_models.py \
+    --static outputs/test/exports/qwen3_static.w2v.txt \
+    --model Qwen/Qwen3-Embedding-0.6B
+```
+
+### Tokenlearn Training (POTION-style)
+
+For higher quality embeddings, use the full [POTION](https://minishlab.github.io/tokenlearn_blogpost/) pipeline which includes:
+
+1. **Distillation**: Create base Model2Vec model
+2. **Featurization**: Generate teacher embeddings on C4 corpus
+3. **Training**: Minimize cosine distance between static and teacher embeddings
+4. **Post-processing**: Apply SIF weighting and remove principal components
+
+```bash
+# Step 1: Create a base Model2Vec model
+uv run python -c "
+from model2vec.distill import distill
+model = distill('Qwen/Qwen3-Embedding-0.6B', pca_dims=256,
+                pooling='last', trust_remote_code=True)
+model.save_pretrained('outputs/model2vec_base')
+"
+
+# Step 2: Generate teacher embeddings using C4 dataset
+uv run python scripts/run_tokenlearn.py featurize \
+    --use-c4 \
+    --output outputs/tokenlearn/features \
+    --model Qwen/Qwen3-Embedding-0.6B \
+    --max-sentences 1000000
+
+# Step 3: Train with Tokenlearn
+uv run python scripts/run_tokenlearn.py train \
+    --features outputs/tokenlearn/features \
+    --base-model outputs/model2vec_base \
+    --output outputs/tokenlearn/trained \
+    --epochs 10
+
+# Step 4: Post-process (SIF weighting + remove principal component)
+uv run python scripts/run_tokenlearn.py post-process \
+    --model outputs/tokenlearn/trained \
+    --features outputs/tokenlearn/features \
+    --base-model outputs/model2vec_base \
+    --output outputs/tokenlearn/processed
+
+# Step 5: Export to Word2Vec format
+uv run python scripts/run_tokenlearn.py export \
+    --model outputs/tokenlearn/processed \
+    --base-model outputs/model2vec_base \
+    --output outputs/tokenlearn/final
+```
+
+**Post-processing details:**
+- **SIF Weighting**: Reweights token embeddings based on corpus frequency: `w = a / (a + prob)` where `a=1e-3`
+- **Remove Principal Component**: Removes the first principal component (All-but-the-Top) to improve isotropy
+- **L2 Normalization**: Final normalization for cosine similarity
+
+The Tokenlearn approach trains the static model to minimize cosine distance between its outputs and the teacher's mean embeddings, resulting in embeddings that better capture sentence-level semantics.
+
+### NVIDIA GPU Optimization (DGX Spark)
+
+The Tokenlearn pipeline includes automatic optimizations for NVIDIA GPUs:
+
+- **TF32**: Enabled for faster matmul on Ampere+ GPUs (A100, H100)
+- **BFloat16**: Uses BF16 instead of FP16 for better numerical stability
+- **Flash Attention 2**: Automatic support when available
+- **cuDNN Benchmark**: Auto-tuning for optimal convolution algorithms
+- **AMP with GradScaler**: Mixed precision training with gradient scaling
+
+For production training on DGX Spark:
+
+```bash
+# Full production run (1M sentences, ~2-4 hours on A100)
+uv run python scripts/run_tokenlearn.py featurize \
+    --use-c4 \
+    --output outputs/tokenlearn/features \
+    --model Qwen/Qwen3-Embedding-0.6B \
+    --max-sentences 1000000 \
+    --batch-size 64 \
+    --device cuda
+
+# Train with larger batch size (benefits from GPU memory)
+uv run python scripts/run_tokenlearn.py train \
+    --features outputs/tokenlearn/features \
+    --base-model outputs/model2vec_base \
+    --output outputs/tokenlearn/trained \
+    --epochs 10 \
+    --batch-size 512 \
+    --device cuda
+
+# Post-process (CPU is fine, fast operation)
+uv run python scripts/run_tokenlearn.py post-process \
+    --model outputs/tokenlearn/trained \
+    --features outputs/tokenlearn/features \
+    --base-model outputs/model2vec_base \
+    --output outputs/tokenlearn/processed
+```
+
+---
 
 
 # How to Use SWEs for Encoding Sentences
